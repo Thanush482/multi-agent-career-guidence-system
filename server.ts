@@ -2,7 +2,8 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { fileDb, Assessment, CareerRecommendation, LearningRoadmap, JobMarketInsight, InterviewQuestion } from "./serverDb";
+import { fileDb, Assessment, CareerRecommendation, LearningRoadmap, JobMarketInsight, InterviewQuestion, Question } from "./serverDb";
+import { DEFAULT_QUESTIONS } from "./src/data/defaultQuestions";
 
 // Load environment variables
 dotenv.config();
@@ -196,16 +197,21 @@ app.post("/api/profile/:id", (req, res) => {
   }
 
   const nextProfile = {
-    currentRole: currentRole !== undefined ? currentRole : user.profile.currentRole,
-    targetRole: targetRole !== undefined ? targetRole : user.profile.targetRole,
-    skills: skills !== undefined ? skills : user.profile.skills,
-    interests: interests !== undefined ? interests : user.profile.interests,
-    experience: experience !== undefined ? experience : user.profile.experience,
-    education: education !== undefined ? education : user.profile.education,
-    certifications: certifications !== undefined ? certifications : user.profile.certifications,
+    currentRole: currentRole !== undefined ? currentRole : (user.profile?.currentRole || ""),
+    targetRole: targetRole !== undefined ? targetRole : (user.profile?.targetRole || ""),
+    skills: skills !== undefined ? skills : (user.profile?.skills || []),
+    interests: interests !== undefined ? interests : (user.profile?.interests || []),
+    experience: experience !== undefined ? experience : (user.profile?.experience || []),
+    education: education !== undefined ? education : (user.profile?.education || []),
+    certifications: certifications !== undefined ? certifications : (user.profile?.certifications || []),
   };
 
-  fileDb.updateUserProfile(user.id, nextProfile, { name, userType, profileAnalyzed });
+  const details: any = {};
+  if (name !== undefined) details.name = name;
+  if (userType !== undefined) details.userType = userType;
+  if (profileAnalyzed !== undefined) details.profileAnalyzed = profileAnalyzed;
+
+  fileDb.updateUserProfile(user.id, nextProfile, Object.keys(details).length > 0 ? details : undefined);
   res.json({ message: "Profile updated successfully", profile: nextProfile, name: name ?? user.name, userType: userType ?? user.userType, profileAnalyzed: profileAnalyzed ?? user.profileAnalyzed });
 });
 
@@ -233,14 +239,94 @@ app.get("/api/admin/users", (req, res) => {
   res.json(users);
 });
 
+async function generateDynamicQuestions(user: any): Promise<Question[]> {
+  let questions = DEFAULT_QUESTIONS;
+  
+  if (user && user.profile) {
+    const ai = getGeminiClient();
+    if (ai) {
+      try {
+        const randomTopics = ["advanced system design", "performance optimization", "security and privacy", "user experience", "data structures", "cloud architecture", "team collaboration", "ethical software development", "problem solving under pressure", "emerging technologies", "agile methodologies", "machine learning integration", "database scaling"];
+        const topic = randomTopics[Math.floor(Math.random() * randomTopics.length)];
+
+        const prompt = `Act as an assessment generator. The user has the following skills: ${user.profile.skills?.join(", ") || "General Tech"} and interests: ${user.profile.interests?.join(", ") || "Software"}.
+        Generate 4 aptitude questions, 3 interest questions, and 3 personality questions tailored to their skills and interests, but assessing their technical aptitude, Holland code interests, and work personality.
+        CRITICAL: Make the questions focus on this specific theme/context: "${topic}".
+        Ensure the questions are completely novel, unique, and distinctly different from any standard questions. Random entropy: ${Math.random()}.
+        Return ONLY valid JSON in this exact shape:
+        {
+          "questions": [
+            {
+              "id": "apt_1", 
+              "category": "aptitude", 
+              "text": "Question text...",
+              "options": [
+                { "label": "Option 1", "value": "correct" },
+                { "label": "Option 2", "value": "incorrect_1" },
+                { "label": "Option 3", "value": "incorrect_2" },
+                { "label": "Option 4", "value": "incorrect_3" }
+              ]
+            }
+          ]
+        }
+        For 'aptitude' questions, use values "correct", "incorrect_1", "incorrect_2", "incorrect_3".
+        For 'interests' questions, use values "A", "B", "C", "D", "E".
+        For 'personality' questions, use values "A", "B", "C", "D".`;
+
+        const aiRes = await callGeminiWithRetry({
+          model: "gemini-3.1-flash-lite",
+          contents: prompt,
+          config: { 
+            responseMimeType: "application/json",
+            temperature: 0.9
+          },
+        });
+
+        const parsed = robustParseJson(aiRes.text);
+        if (parsed.questions && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+          questions = parsed.questions;
+        }
+      } catch (err: any) {
+        console.warn("Failed to generate dynamic questions, falling back to defaults", err?.message || err);
+      }
+    }
+  }
+  return questions;
+}
+
 // 4. Adaptive Assessment endpoints (A-002: Assessment Agent)
-app.get("/api/assessment/:userId", (req, res) => {
-  const assessment = fileDb.getAssessment(req.params.userId);
+app.get("/api/assessment/:userId", async (req, res) => {
+  const userId = req.params.userId;
+  const assessment = fileDb.getAssessment(userId);
   if (assessment) {
     return res.json(assessment);
   }
+  
+  const user = fileDb.getUserById(userId);
+  const questions = await generateDynamicQuestions(user);
+
   // Initialize newly
-  const newAssessment = {
+  const newAssessment: Assessment = {
+    userId: userId,
+    answers: {},
+    completed: false,
+    score: 0,
+    aptitudeScore: 0,
+    interestsScore: { analytical: 0, creative: 0, social: 0, technical: 0, managerial: 0 },
+    personalityType: "Pending Completion",
+    questions: questions,
+  };
+  fileDb.saveAssessment(userId, newAssessment);
+  res.json(newAssessment);
+});
+
+app.post("/api/assessment/:userId/reset", async (req, res) => {
+  const userId = req.params.userId;
+  const user = fileDb.getUserById(userId);
+  
+  const questions = await generateDynamicQuestions(user);
+
+  const newAssessment: Assessment = {
     userId: req.params.userId,
     answers: {},
     completed: false,
@@ -248,106 +334,116 @@ app.get("/api/assessment/:userId", (req, res) => {
     aptitudeScore: 0,
     interestsScore: { analytical: 0, creative: 0, social: 0, technical: 0, managerial: 0 },
     personalityType: "Pending Completion",
+    questions: questions,
   };
   fileDb.saveAssessment(req.params.userId, newAssessment);
   res.json(newAssessment);
 });
 
 app.post("/api/assessment/:userId/submit", async (req, res) => {
-  const { answers } = req.body;
-  const userId = req.params.userId;
-  const user = fileDb.getUserById(userId);
-  if (!user) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  // Calculate scores (weighted profile computation)
-  let analytical = 0, creative = 0, social = 0, technical = 0, managerial = 0;
-  let aptitudePoints = 0;
-
-  // Let's analyze answers mapping
-  Object.keys(answers).forEach((qId) => {
-    const val = answers[qId] || "";
-    if (qId.startsWith("apt_")) {
-      if (val === "correct" || val === "A" || val === "B") aptitudePoints += 20;
-    } else if (qId.startsWith("int_")) {
-      if (val === "A") creative += 25;
-      else if (val === "B") analytical += 25;
-      else if (val === "C") social += 25;
-      else if (val === "D") technical += 25;
-      else managerial += 25;
-    } else {
-      // Personality Qs
-      if (val === "A") creative += 10;
-      else if (val === "B") analytical += 10;
-      else if (val === "C") social += 10;
-      else technical += 10;
+  try {
+    const answers = req.body?.answers || {};
+    const userId = req.params.userId;
+    const user = fileDb.getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
     }
-  });
 
-  const aptitudeScore = Math.min(100, Math.max(15, aptitudePoints + 30)); // Seed starting value
-  const interestsScore = {
-    analytical: Math.min(100, Math.round(analytical + 20)),
-    creative: Math.min(100, Math.round(creative + 15)),
-    social: Math.min(100, Math.round(social + 10)),
-    technical: Math.min(100, Math.round(technical + 25)),
-    managerial: Math.min(100, Math.round(managerial + 20)),
-  };
+    // Calculate scores (weighted profile computation)
+    let analytical = 0, creative = 0, social = 0, technical = 0, managerial = 0;
+    let aptitudePoints = 0;
 
-  const ai = getGeminiClient();
-  let personalityType = "Analytical Strategist";
-  let analysisText = "You show strong qualities of systematic deduction and analytical thinking, thriving in technical environments where structured thinking translates to robust outcomes.";
+    // Let's analyze answers mapping
+    Object.keys(answers).forEach((qId) => {
+      const val = answers[qId] || "";
+      if (qId.startsWith("apt_")) {
+        if (val === "correct" || val === "A" || val === "B") aptitudePoints += 20;
+      } else if (qId.startsWith("int_")) {
+        if (val === "A") creative += 25;
+        else if (val === "B") analytical += 25;
+        else if (val === "C") social += 25;
+        else if (val === "D") technical += 25;
+        else managerial += 25;
+      } else {
+        // Personality Qs
+        if (val === "A") creative += 10;
+        else if (val === "B") analytical += 10;
+        else if (val === "C") social += 10;
+        else technical += 10;
+      }
+    });
 
-  if (ai) {
-    try {
-      const prompt = `Evaluate answers to this career assessment: ${JSON.stringify(answers)}.
-      The user profile is: Name: ${user.name}, User Type: ${user.userType}, Current Skills: ${user.profile.skills.join(", ")}.
-      Please analyze the user's career personality type (e.g., 'Tech-Innovator', 'Analytical Strategist', 'Creative Champion', or 'Social Catalyst'), interest levels (analytical, creative, social, technical, managerial out of 100), and write a 2-paragraph inspiring analysis on their optimal workplace environment.
-      Respond ONLY in valid, parseable JSON of this shape:
-      {
-        "personalityType": "Your determined archetype string",
-        "analysisText": "The 2-paragraph analysis text"
-      }`;
+    const aptitudeScore = Math.min(100, Math.max(15, aptitudePoints + 30)); // Seed starting value
+    const interestsScore = {
+      analytical: Math.min(100, Math.round(analytical + 20)),
+      creative: Math.min(100, Math.round(creative + 15)),
+      social: Math.min(100, Math.round(social + 10)),
+      technical: Math.min(100, Math.round(technical + 25)),
+      managerial: Math.min(100, Math.round(managerial + 20)),
+    };
 
-      const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-        },
-      });
+    const ai = getGeminiClient();
+    let personalityType = "Analytical Strategist";
+    let analysisText = "You show strong qualities of systematic deduction and analytical thinking, thriving in technical environments where structured thinking translates to robust outcomes.";
 
-      const parsed = robustParseJson(aiRes.text);
-      if (parsed.personalityType) personalityType = parsed.personalityType;
-      if (parsed.analysisText) analysisText = parsed.analysisText;
-    } catch (err: any) {
-      console.warn("Gemini personality analysis failed, using realistic scoring engine fallback:", err?.message || err);
+    if (ai) {
+      try {
+        const prompt = `Evaluate answers to this career assessment: ${JSON.stringify(answers)}.
+        The user profile is: Name: ${user.name}, User Type: ${user.userType}, Current Skills: ${(user.profile?.skills || []).join(", ") || "None"}.
+        Please analyze the user's career personality type (e.g., 'Tech-Innovator', 'Analytical Strategist', 'Creative Champion', or 'Social Catalyst'), interest levels (analytical, creative, social, technical, managerial out of 100), and write a 2-paragraph inspiring analysis on their optimal workplace environment.
+        Respond ONLY in valid, parseable JSON of this shape:
+        {
+          "personalityType": "Your determined archetype string",
+          "analysisText": "The 2-paragraph analysis text"
+        }`;
+
+        const aiRes = await callGeminiWithRetry({
+          model: "gemini-3.1-flash-lite",
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+          },
+        });
+
+        const parsed = robustParseJson(aiRes.text);
+        if (parsed.personalityType) personalityType = parsed.personalityType;
+        if (parsed.analysisText) analysisText = parsed.analysisText;
+      } catch (err: any) {
+        console.warn("Gemini personality analysis failed, using realistic scoring engine fallback:", err?.message || err);
+      }
     }
+
+    // Determine a default archetype based on highest score if AI fallback was triggered
+    if (personalityType === "Analytical Strategist" && creative > technical && creative > social) {
+      personalityType = "Creative Visionary";
+      analysisText = "Your responses highlight an open-minded aptitude for designing novel solutions and expressing artistic or aesthetic flair in digital engineering and layout designs.";
+    } else if (social > technical && social > analytical) {
+      personalityType = "People-Centric Specialist";
+      analysisText = "You derive energy and inspiration from direct communication, team syncs, and mentorship, aiming to organize programs that cultivate collective alignment.";
+    }
+
+    const prevAssessment = fileDb.getAssessment(userId);
+    const assessment: Assessment & { questions?: any[] } = {
+      userId,
+      answers,
+      completed: true,
+      score: Math.round((aptitudeScore * 0.4) + (technical * 0.6)),
+      aptitudeScore,
+      interestsScore,
+      personalityType,
+      analysisText,
+      completedAt: new Date().toISOString(),
+    };
+    if (prevAssessment && 'questions' in prevAssessment) {
+      assessment.questions = (prevAssessment as any).questions;
+    }
+
+    fileDb.saveAssessment(userId, assessment);
+    res.json(assessment);
+  } catch (err: any) {
+    console.error("Submit assessment error:", err);
+    res.status(500).json({ error: "Failed to submit assessment" });
   }
-
-  // Determine a default archetype based on highest score if AI fallback was triggered
-  if (personalityType === "Analytical Strategist" && creative > technical && creative > social) {
-    personalityType = "Creative Visionary";
-    analysisText = "Your responses highlight an open-minded aptitude for designing novel solutions and expressing artistic or aesthetic flair in digital engineering and layout designs.";
-  } else if (social > technical && social > analytical) {
-    personalityType = "People-Centric Specialist";
-    analysisText = "You derive energy and inspiration from direct communication, team syncs, and mentorship, aiming to organize programs that cultivate collective alignment.";
-  }
-
-  const assessment: Assessment = {
-    userId,
-    answers,
-    completed: true,
-    score: Math.round((aptitudeScore * 0.4) + (technical * 0.6)),
-    aptitudeScore,
-    interestsScore,
-    personalityType,
-    analysisText,
-    completedAt: new Date().toISOString(),
-  };
-
-  fileDb.saveAssessment(userId, assessment);
-  res.json(assessment);
 });
 
 // 5. Multi-Agent Recommendations Module (A-003, A-008: Recommendation & Orchestration)
@@ -375,30 +471,27 @@ app.post("/api/agent/recommendations/:userId", async (req, res) => {
       confidenceScore: 0.92,
       matchPercentage: 92,
       justification: "Your strong technical skills, combined with a creative design aptitude and solid critical execution scores, map perfectly onto full-stack application architecting.",
-      matchedSkills: user.profile.skills.slice(0, 3).concat(["Vite", "JSON Data Modeling"]),
+      matchedSkills: (user.profile?.skills || []).slice(0, 3).concat(["Vite", "JSON Data Modeling"]),
       missingSkills: ["Tailwind CSS v4", "Docker Containers", "PostgreSQL", "GoogleGenAI SDK"],
       demandLevel: "High",
-      salaryRange: "$95,000 - $145,000",
     },
     {
       role: "AI Integration Solutions Engineer",
       confidenceScore: 0.85,
       matchPercentage: 85,
       justification: "Your stated interest in AI Orchestration combined with analytical thinking matches the urgent global need for developers capable of wiring up LLMs securely.",
-      matchedSkills: ["Express", "System Orchestration"].filter((s) => user.profile.skills.includes(s)),
+      matchedSkills: ["Express", "System Orchestration"].filter((s) => (user.profile?.skills || []).includes(s)),
       missingSkills: ["Gemini API Function Calling", "Prompt Engineering", "Vector Embeddings", "RAG Pipeline Tuning"],
       demandLevel: "High",
-      salaryRange: "$110,000 - $175,000",
     },
     {
       role: "DevOps & Cloud Administrator",
       confidenceScore: 0.78,
       matchPercentage: 78,
       justification: "Your background in Server Administration and security certifications indicate a robust readiness to design auto-scaling container configurations.",
-      matchedSkills: user.profile.skills.filter((s) => ["Docker", "Server Administration"].includes(s)),
+      matchedSkills: (user.profile?.skills || []).filter((s) => ["Docker", "Server Administration"].includes(s)),
       missingSkills: ["GitHub Actions", "Kubernetes Clustering", "Redis Caching", "Nginx Proxies"],
       demandLevel: "Medium",
-      salaryRange: "$105,000 - $155,000",
     },
   ];
 
@@ -421,7 +514,6 @@ app.post("/api/agent/recommendations/:userId", async (req, res) => {
       4. A specific array of matchedSkills (existing skills from their list that align).
       5. A specific array of missingSkills (skills they do NOT list but must gain).
       6. Market demandLevel ("High", "Medium", or "Low").
-      7. A standard annual salaryRange scale (e.g. "$90,000 - $130,000").
 
       Respond ONLY with a valid, parseable JSON payload of this exact shape:
       {
@@ -433,14 +525,13 @@ app.post("/api/agent/recommendations/:userId", async (req, res) => {
             "justification": "Detailed explanation string.",
             "matchedSkills": ["skill1", "skill2"],
             "missingSkills": ["skill3", "skill4"],
-            "demandLevel": "High",
-            "salaryRange": "$90,000 - $130,000"
+            "demandLevel": "High"
           }
         ]
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -536,7 +627,7 @@ app.post("/api/agent/roadmap/:userId", async (req, res) => {
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -644,7 +735,7 @@ app.get("/api/agent/job-market/:role", async (req, res) => {
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -719,7 +810,7 @@ app.post("/api/agent/interview/initiate/:userId", async (req, res) => {
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -787,7 +878,7 @@ app.post("/api/agent/interview/:userId/submit-answer", async (req, res) => {
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -848,7 +939,7 @@ app.post("/api/agent/resume-optimize/:userId", async (req, res) => {
       }`;
 
       const aiRes = await callGeminiWithRetry({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
@@ -873,7 +964,7 @@ app.post("/api/chat", async (req, res) => {
     return res.status(400).json({ error: "Messages array is required." });
   }
 
-  const selectedModel = model || "gemini-3.5-flash";
+  const selectedModel = model || "gemini-3.1-flash-lite";
   const systemPrompt = systemInstruction || "You are a helpful career advisor.";
   const ai = getGeminiClient();
 
