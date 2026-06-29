@@ -80,10 +80,6 @@ export default function App() {
         const meData = await meRes.json();
         setUser(meData);
         localStorage.setItem("macgs_user", JSON.stringify(meData));
-      } else if (meRes.status === 404) {
-        setUser(null);
-        localStorage.removeItem("macgs_user");
-        return;
       }
 
       // Sync assessment
@@ -319,7 +315,6 @@ export default function App() {
                 setAssessment(nextAssessment);
                 syncUserData(user.id);
               }} 
-              onNavigateToRecommendations={() => setActiveTab("recommendations")}
             />
           )}
 
@@ -331,7 +326,6 @@ export default function App() {
               onSetRecommendations={setRecommendations}
               onSetTargetTrack={handleSetTargetTrack}
               activeRoleTrack={activeRoleTrack}
-              onNavigateToAssessment={() => setActiveTab("assessment")}
             />
           )}
 
