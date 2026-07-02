@@ -9,6 +9,7 @@ interface RecommendationsPageProps {
   onSetRecommendations: (recs: CareerRecommendation[]) => void;
   onSetTargetTrack: (roleName: string, missingSkills: string[]) => void;
   activeRoleTrack: string | null;
+  onNavigateToAssessment?: () => void;
 }
 
 export default function RecommendationsPage({
@@ -18,6 +19,7 @@ export default function RecommendationsPage({
   onSetRecommendations,
   onSetTargetTrack,
   activeRoleTrack,
+  onNavigateToAssessment
 }: RecommendationsPageProps) {
   const [loading, setLoading] = useState(false);
   const [initiateLoading, setInitiateLoading] = useState<string | null>(null);
@@ -100,7 +102,7 @@ export default function RecommendationsPage({
           <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
           <div>
             <span className="font-bold block">Assessment pending.</span>
-            Our recommendations currently utilize baseline profile matching. To gain highly precise, adaptive psychometric profiling, we strongly recommend taking the <button onClick={() => {}} className="underline font-bold hover:text-amber-700 cursor-pointer">Adaptive Assessment questionnaire</button>!
+            Our recommendations currently utilize baseline profile matching. To gain highly precise, adaptive psychometric profiling, we strongly recommend taking the <button onClick={() => { if (onNavigateToAssessment) onNavigateToAssessment(); }} className="underline font-bold hover:text-amber-700 cursor-pointer">Adaptive Assessment questionnaire</button>!
           </div>
         </div>
       )}
@@ -143,8 +145,7 @@ export default function RecommendationsPage({
                       <p className="text-[11px] text-gray-500 mt-1 line-clamp-3 leading-normal">{rec.justification}</p>
                     </div>
 
-                    <div className="pt-4 border-t border-gray-100 mt-4 flex justify-between items-center text-[11px]">
-                      <span className="text-gray-400 font-semibold">{rec.salaryRange}</span>
+                    <div className="pt-4 border-t border-gray-100 mt-4 flex justify-end items-center text-[11px]">
                       {isActiveTrack ? (
                         <span className="text-emerald-600 font-bold flex items-center">
                           <Check className="w-4.5 h-4.5 mr-0.5" /> Target Role
